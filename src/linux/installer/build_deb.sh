@@ -165,6 +165,7 @@ Architecture: all
 Installed-Size: ${INSTALLED_SIZE}
 Maintainer: Qualcomm Innovation Center, Inc.
 Conflicts: qcom-usb-drivers-dkms
+Replaces: qcom-usb-drivers-dkms
 Description: Qualcomm USB Userspace Driver
  Provides logical representations of Qualcomm chipset-enabled mobile devices
  over USB using libusb (userspace communication). Replaces the need for
@@ -176,6 +177,64 @@ Description: Qualcomm USB Userspace Driver
   - Udev rules for non-root device access
   - Supports upgrade, reinstall, and downgrade workflows
 EOFCONTROL
+
+###############################################################################
+# Create DEBIAN/preinst (runs before unpack — removes conflicting packages)
+###############################################################################
+
+cat > "$PKG_ROOT/DEBIAN/preinst" <<'EOFPREINST'
+#!/bin/bash
+# Pre-installation script for qcom-usb-userspace-driver
+# Removes conflicting kernel-space driver packages before dpkg unpacks files.
+set -e
+
+case "$1" in
+    install|upgrade)
+        # --- Unload DKMS-built kernel modules ---
+        for mod in qcom-serial qcom_usbnet qcom_usb qtiDevInf; do
+            mod_under=$(echo "$mod" | tr '-' '_')
+            if lsmod | grep -q "^${mod_under}"; then
+                echo "Unloading kernel module: $mod"
+                rmmod "$mod" 2>/dev/null || true
+            fi
+        done
+
+        # --- Clean up any leftover DKMS registrations ---
+        if command -v dkms >/dev/null 2>&1; then
+            for entry in $(dkms status 2>/dev/null | grep -i "qcom-usb-drivers" | awk -F'[,:]' '{print $1 "/" $2}' | tr -d ' '); do
+                echo "Removing DKMS registration: $entry"
+                dkms remove "$entry" --all 2>/dev/null || true
+            done
+        fi
+
+        # --- Remove legacy QTI installation ---
+        if [ -d /opt/QTI/QUD ]; then
+            echo "Removing legacy QTI QUD installation..."
+            if [ -f /opt/QTI/QUD/QcDevDriver.sh ]; then
+                bash /opt/QTI/QUD/QcDevDriver.sh uninstall 2>/dev/null || true
+            fi
+            rm -rf /opt/QTI/QUD
+        fi
+
+        # --- Stop legacy systemd services ---
+        for svc in qcom-qud QUDService; do
+            if systemctl is-active --quiet "$svc" 2>/dev/null; then
+                systemctl stop "$svc" 2>/dev/null || true
+            fi
+            if [ -f "/etc/systemd/system/${svc}.service" ]; then
+                systemctl disable "$svc" 2>/dev/null || true
+                rm -f "/etc/systemd/system/${svc}.service"
+            fi
+        done
+        systemctl daemon-reload 2>/dev/null || true
+
+        echo "Pre-installation cleanup complete."
+        ;;
+esac
+
+exit 0
+EOFPREINST
+chmod 755 "$PKG_ROOT/DEBIAN/preinst"
 
 ###############################################################################
 # Create DEBIAN/postinst (runs after install)
@@ -197,13 +256,6 @@ case "$1" in
             cp "$QCOM_DEST/VERSION" "$QCOM_DEST/.version"
         fi
 
-        # --- Remove conflicting kernel-space deb package if installed ---
-        if dpkg -s qcom-usb-drivers-dkms >/dev/null 2>&1; then
-            echo "Detected conflicting kernel-space driver package (qcom-usb-drivers-dkms)."
-            echo "Removing it to avoid conflicts with userspace driver..."
-            dpkg -r qcom-usb-drivers-dkms 2>/dev/null || true
-        fi
-
         # --- Remove conflicting QUD kernel drivers (manual install) if present ---
         QCOM_USB_DRIVER_PATH="/lib/modules/$(uname -r)/kernel/drivers/usb/misc"
         QCOM_USBNET_DRIVER_PATH="/lib/modules/$(uname -r)/kernel/drivers/net/usb"
@@ -212,19 +264,6 @@ case "$1" in
             if [ -f "$QCOM_DEST/qcom_drivers.sh" ]; then
                 bash "$QCOM_DEST/qcom_drivers.sh" uninstall 2>/dev/null || true
             fi
-        fi
-
-        # --- Remove DKMS-built kernel modules if still present ---
-        for mod in qtiDevInf qcom_usb qcom_usbnet qcom-serial; do
-            if lsmod | grep -q "^${mod//-/_}"; then
-                rmmod "${mod//-/_}" 2>/dev/null || true
-            fi
-        done
-        # Clean up any leftover DKMS registrations
-        if command -v dkms >/dev/null 2>&1; then
-            for entry in $(dkms status 2>/dev/null | grep -i "qcom-usb-drivers" | awk -F'[,:]' '{print $1 "/" $2}' | tr -d ' '); do
-                dkms remove "$entry" --all 2>/dev/null || true
-            done
         fi
 
         # --- Blacklist qcserial ---
