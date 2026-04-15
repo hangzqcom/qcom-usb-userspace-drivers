@@ -9,6 +9,7 @@
 //
 // Usage:
 //   qcom-usb-userspace-drivers.exe                 Install (auto-upgrades old version)
+//   qcom-usb-userspace-drivers.exe /uninstall      Uninstall all previously installed drivers
 //   qcom-usb-userspace-drivers.exe /query          Query installed version
 //   qcom-usb-userspace-drivers.exe /force          Force install (skip version check)
 //   qcom-usb-userspace-drivers.exe /version        Print installer version and exit
@@ -151,6 +152,12 @@ static bool GetInstallDate(char *buf, DWORD bufSize)
 {
     return RegReadString(HKEY_LOCAL_MACHINE, INSTALLER_REG_KEY,
                          INSTALLER_REG_INSTALL_DATE, buf, bufSize);
+}
+
+static bool RegDeleteKey_Full(HKEY hRoot, const char *subKey)
+{
+    LSTATUS status = RegDeleteKeyA(hRoot, subKey);
+    return status == ERROR_SUCCESS;
 }
 
 static void SaveInstallInfo(const char *version, const char *infList)
@@ -837,6 +844,7 @@ static void PrintUsage(void)
     printf("Usage: qcom-usb-userspace-drivers [options]\n\n");
     printf("Options:\n");
     printf("  (no options)   Install drivers (auto-upgrades if older version found)\n");
+    printf("  /uninstall     Uninstall all previously installed drivers\n");
     printf("  /query         Query installed driver packages and detect conflicts\n");
     printf("  /force         Force install (bypass version check, reinstall/downgrade)\n");
     printf("  /version       Print installer version and exit\n");
@@ -940,6 +948,90 @@ static int CmdVersion(void)
 }
 
 // ============================================================================
+// Uninstall command
+// ============================================================================
+
+static int CmdUninstall(void)
+{
+    char version[128] = {0};
+    char infList[4096] = {0};
+    int removed = 0, total = 0;
+
+    printf("==========================================\n");
+    printf(" %s\n", INSTALLER_PACKAGE_NAME);
+    printf(" Uninstaller v%s\n", INSTALLER_VERSION_STR);
+    printf("==========================================\n\n");
+
+    bool hasVersion = GetInstalledVersion(version, sizeof(version));
+    bool hasInfList = GetInstalledINFList(infList, sizeof(infList));
+
+    if (!hasVersion && !hasInfList) {
+        printf("No installation found. Nothing to uninstall.\n");
+        printf("\nPress any key to exit...\n");
+        getchar();
+        return 0;
+    }
+
+    if (hasVersion)
+        printf("Installed version: %s\n\n", version);
+
+    // Uninstall each driver from the INF list
+    if (hasInfList && infList[0]) {
+        printf("Removing installed drivers...\n\n");
+
+        // Make a copy since strtok_s modifies the string
+        char infListCopy[4096];
+        strncpy_s(infListCopy, sizeof(infListCopy), infList, _TRUNCATE);
+
+        char *ctx = NULL;
+        char *token = strtok_s(infListCopy, ";", &ctx);
+        while (token) {
+            while (*token == ' ') token++;
+            if (*token) {
+                total++;
+                printf("------------------\n");
+                if (UninstallDriverByINF(token) == 0) {
+                    removed++;
+                }
+                printf("\n");
+            }
+            token = strtok_s(NULL, ";", &ctx);
+        }
+    } else {
+        printf("No INF list found in registry. Attempting to remove known drivers...\n\n");
+
+        // Fall back to removing known userspace INFs
+        for (size_t i = 0; i < NUM_USERSPACE_DRIVER_INFS; i++) {
+            total++;
+            printf("------------------\n");
+            if (UninstallDriverByINF(kUserspaceDriverINFs[i]) == 0) {
+                removed++;
+            }
+            printf("\n");
+        }
+    }
+
+    // Clean up registry
+    printf("Cleaning up registry...\n");
+    if (RegDeleteKey_Full(HKEY_LOCAL_MACHINE, INSTALLER_REG_KEY)) {
+        printf("  Registry key removed: HKLM\\%s\n\n", INSTALLER_REG_KEY);
+    } else {
+        printf("  Registry key not found or already removed.\n\n");
+    }
+
+    printf("==========================================\n");
+    printf(" Uninstall Summary\n");
+    printf("==========================================\n");
+    printf("  Drivers processed: %d\n", total);
+    printf("  Drivers removed:   %d\n", removed);
+    printf("==========================================\n");
+
+    printf("\nPress any key to exit...\n");
+    getchar();
+    return 0;
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 
@@ -954,6 +1046,7 @@ int main(int argc, char *argv[])
     bool forceInstall = false;
     bool queryMode = false;
     bool versionMode = false;
+    bool uninstallMode = false;
 
     // Parse command-line arguments
     for (int i = 1; i < argc; i++) {
@@ -963,6 +1056,8 @@ int main(int argc, char *argv[])
             forceInstall = true;
         } else if (_stricmp(argv[i], "/version") == 0 || _stricmp(argv[i], "-version") == 0) {
             versionMode = true;
+        } else if (_stricmp(argv[i], "/uninstall") == 0 || _stricmp(argv[i], "-uninstall") == 0) {
+            uninstallMode = true;
         } else if (_stricmp(argv[i], "/help") == 0 || _stricmp(argv[i], "-help") == 0 ||
                    _stricmp(argv[i], "/?") == 0 || _stricmp(argv[i], "-h") == 0) {
             PrintUsage();
@@ -981,6 +1076,21 @@ int main(int argc, char *argv[])
     // Handle /query (no admin required)
     if (queryMode)
         return CmdQuery();
+
+    // Handle /uninstall (requires admin — elevation handled below)
+    if (uninstallMode) {
+        if (!IsRunningAsAdmin()) {
+            printf("Administrator privileges required. Requesting elevation...\n");
+            if (RelaunchAsAdmin(argc, argv))
+                return 0;
+            printf("ERROR: Failed to obtain administrator privileges.\n");
+            printf("Please right-click the installer and select 'Run as administrator'.\n");
+            printf("\nPress any key to exit...\n");
+            getchar();
+            return 1;
+        }
+        return CmdUninstall();
+    }
 
     // --- Installation flow ---
     printf("==========================================\n");
