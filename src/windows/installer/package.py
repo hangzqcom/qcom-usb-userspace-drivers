@@ -7,7 +7,7 @@
 # Usage: package.py <input_exe> <driver_dir> [output_exe]
 #
 # If output_exe is omitted, the version is read from version.h and used
-# to generate the filename: QcomUsbDriverInstaller_<version>.exe
+# to generate the filename: qcom-usb-userspace-drivers_<version>.exe
 #
 # This script:
 #   1. Copies the input EXE to the output path
@@ -59,9 +59,9 @@ def main():
     else:
         version = read_version_from_header()
         if version:
-            output_exe = f"QcomUsbDriverInstaller_{version}.exe"
+            output_exe = f"qcom-usb-userspace-drivers_{version}.exe"
         else:
-            output_exe = "QcomUsbDriverInstaller.exe"
+            output_exe = "qcom-usb-userspace-drivers.exe"
             print("WARNING: Could not read version from version.h, using default name")
 
     if not os.path.isfile(input_exe):

@@ -15,7 +15,7 @@ target_link_libraries(qcom_usb_installer PRIVATE shlwapi shell32)
 # Console subsystem so printf output is visible
 set_target_properties(qcom_usb_installer PROPERTIES
     WIN32_EXECUTABLE FALSE
-    OUTPUT_NAME "QcomUsbDriverInstaller"
+    OUTPUT_NAME "qcom-usb-userspace-drivers"
 )
 
 # Request admin elevation via UAC

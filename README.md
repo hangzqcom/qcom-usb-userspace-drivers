@@ -29,26 +29,34 @@ installer EXE produced by `src\windows\installer\package.bat`.
 
 | Command | Description |
 |---|---|
-| `QcomUsbDriverInstaller.exe` | Install drivers (auto-upgrades if an older version is found) |
-| `QcomUsbDriverInstaller.exe /query` | Query installed driver package name, version, and date |
-| `QcomUsbDriverInstaller.exe /force` | Force install (bypass version check — reinstall or downgrade) |
-| `QcomUsbDriverInstaller.exe /version` | Print installer version and exit |
-| `QcomUsbDriverInstaller.exe /help` | Print usage help |
+| `qcom-usb-userspace-drivers.exe` | Install drivers (auto-upgrades if an older version is found) |
+| `qcom-usb-userspace-drivers.exe /query` | Query installed packages and detect conflicting drivers |
+| `qcom-usb-userspace-drivers.exe /force` | Force install (bypass version check — reinstall or downgrade) |
+| `qcom-usb-userspace-drivers.exe /version` | Print installer version and exit |
+| `qcom-usb-userspace-drivers.exe /help` | Print usage help |
 
 > **Note:** The installer requires Administrator privileges and will prompt for
 > elevation automatically.
 
 The installer records the installed version, INF list, and install date in the
-registry at `HKLM\SOFTWARE\Qualcomm\QcomUsbDrivers`. On upgrade or `/force`
-reinstall, it automatically uninstalls previously installed driver packages
-before installing the new ones.
+registry at `HKLM\SOFTWARE\Qualcomm\QcomUsbDrivers`. Before installing, the
+installer automatically detects and removes **all conflicting driver packages**:
+
+| Conflict type | Detection method | Removal method |
+|---|---|---|
+| Previous userspace driver installation | Registry INF list at `HKLM\SOFTWARE\Qualcomm\QcomUsbDrivers` | `pnputil /delete-driver` for each recorded INF |
+| Kernel-mode driver packages (`qcfilter`, `qcwwan`, `qdbusb`, `qcwdfmdm`, `qcwdfser`) | `pnputil /enum-drivers` matching original INF name | `pnputil /delete-driver /uninstall /force` |
+| Legacy QPM-managed packages (`QUD`, `QUD.internal`, `Qualcomm_Userspace_Driver`) | `qpm-cli` availability on PATH | `qpm-cli --uninstall <package>` |
+
+All conflict removal is non-fatal — if a conflicting package is not found or
+removal fails, installation proceeds normally.
 
 **Building the installer:**
 ```bat
 cd src\windows\installer
 package.bat
 ```
-This produces `QcomUsbDriverInstaller_<version>.exe` in the current directory.
+This produces `qcom-usb-userspace-drivers_<version>.exe` in the current directory.
 
 #### Windows — Manual Installation
 

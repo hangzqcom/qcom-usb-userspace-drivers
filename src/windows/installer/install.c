@@ -8,11 +8,11 @@
 // Must be run as Administrator.
 //
 // Usage:
-//   QcomUsbDriverInstaller.exe                 Install (auto-upgrades old version)
-//   QcomUsbDriverInstaller.exe /query          Query installed version
-//   QcomUsbDriverInstaller.exe /force          Force install (skip version check)
-//   QcomUsbDriverInstaller.exe /version        Print installer version and exit
-//   QcomUsbDriverInstaller.exe /help           Print usage
+//   qcom-usb-userspace-drivers.exe                 Install (auto-upgrades old version)
+//   qcom-usb-userspace-drivers.exe /query          Query installed version
+//   qcom-usb-userspace-drivers.exe /force          Force install (skip version check)
+//   qcom-usb-userspace-drivers.exe /version        Print installer version and exit
+//   qcom-usb-userspace-drivers.exe /help           Print usage
 
 #include <windows.h>
 #include <stdio.h>
@@ -27,6 +27,28 @@
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "advapi32.lib")
+
+// ============================================================================
+// Conflicting driver packages — removed before fresh or upgrade installs
+// ============================================================================
+
+// Kernel-mode driver INFs (from qcom-usb-kernel-drivers)
+static const char *kKernelDriverINFs[] = {
+    "qcfilter.inf",
+    "qcwwan.inf",
+    "qdbusb.inf",
+    "qcwdfmdm.inf",
+    "qcwdfser.inf",
+};
+#define NUM_KERNEL_DRIVER_INFS (sizeof(kKernelDriverINFs) / sizeof(kKernelDriverINFs[0]))
+
+// Legacy QPM-managed package names (installed via Qualcomm Package Manager)
+static const char *kLegacyQpmPackages[] = {
+    "QUD",
+    "QUD.internal",
+    "Qualcomm_Userspace_Driver",
+};
+#define NUM_LEGACY_QPM_PACKAGES (sizeof(kLegacyQpmPackages) / sizeof(kLegacyQpmPackages[0]))
 
 // ============================================================================
 // Payload trailer — appended after the ZIP at the end of the EXE
@@ -507,7 +529,7 @@ static void UninstallOldDrivers(void)
         return;
     }
 
-    printf("Uninstalling previous driver packages...\n\n");
+    printf("Uninstalling previous userspace driver packages...\n");
 
     // INF list is semicolon-separated: "qcadb.inf;qcserlib.inf;..."
     char *ctx = NULL;
@@ -521,6 +543,116 @@ static void UninstallOldDrivers(void)
         token = strtok_s(NULL, ";", &ctx);
     }
     printf("\n");
+}
+
+// ============================================================================
+// Uninstall conflicting kernel-mode driver packages (pnputil)
+// ============================================================================
+
+static void UninstallKernelDrivers(void)
+{
+    printf("Checking for conflicting kernel-mode driver packages...\n");
+
+    for (size_t i = 0; i < NUM_KERNEL_DRIVER_INFS; i++) {
+        // UninstallDriverByINF returns 0 on success or if not found
+        UninstallDriverByINF(kKernelDriverINFs[i]);
+    }
+    printf("\n");
+}
+
+// ============================================================================
+// Uninstall legacy QPM-managed packages (qpm-cli)
+// ============================================================================
+
+static bool IsQpmCliAvailable(void)
+{
+    // Try running "qpm-cli --version" silently to check if it exists
+    STARTUPINFOA si = {0};
+    PROCESS_INFORMATION pi = {0};
+    char cmdLine[256] = "cmd /c qpm-cli --version >nul 2>&1";
+
+    si.cb = sizeof(si);
+    if (!CreateProcessA(NULL, cmdLine, NULL, NULL, FALSE,
+                        CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+        return false;
+    }
+    WaitForSingleObject(pi.hProcess, 5000);  // 5 second timeout
+    DWORD exitCode = 1;
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    return exitCode == 0;
+}
+
+static int UninstallQpmPackage(const char *packageName)
+{
+    char cmdLine[512];
+    STARTUPINFOA si = {0};
+    PROCESS_INFORMATION pi = {0};
+    DWORD exitCode = 1;
+
+    snprintf(cmdLine, sizeof(cmdLine),
+             "cmd /c qpm-cli --uninstall %s 2>&1", packageName);
+
+    si.cb = sizeof(si);
+    if (!CreateProcessA(NULL, cmdLine, NULL, NULL, FALSE,
+                        CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+        printf("  WARNING: Failed to launch qpm-cli for %s\n", packageName);
+        return 1;
+    }
+
+    WaitForSingleObject(pi.hProcess, 60000);  // 60 second timeout
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+
+    if (exitCode == 0) {
+        printf("  OK: Legacy package '%s' uninstalled\n", packageName);
+    } else {
+        printf("  INFO: Legacy package '%s' not installed or already removed (exit %lu)\n",
+               packageName, exitCode);
+    }
+    return 0;  // Non-fatal
+}
+
+static void UninstallLegacyQpmPackages(void)
+{
+    printf("Checking for legacy QPM-managed packages...\n");
+
+    if (!IsQpmCliAvailable()) {
+        printf("  qpm-cli not found on PATH — skipping legacy package check.\n\n");
+        return;
+    }
+
+    printf("  qpm-cli found. Attempting to remove legacy packages...\n");
+    for (size_t i = 0; i < NUM_LEGACY_QPM_PACKAGES; i++) {
+        UninstallQpmPackage(kLegacyQpmPackages[i]);
+    }
+    printf("\n");
+}
+
+// ============================================================================
+// Remove all conflicting packages before installation
+// ============================================================================
+
+static void UninstallConflictingPackages(void)
+{
+    printf("------------------------------------------\n");
+    printf(" Removing conflicting driver packages\n");
+    printf("------------------------------------------\n\n");
+
+    // 1. Legacy QPM-managed packages (try first — may remove kernel+userspace)
+    UninstallLegacyQpmPackages();
+
+    // 2. Previous userspace installation (tracked in registry)
+    UninstallOldDrivers();
+
+    // 3. Kernel-mode driver packages (from qcom-usb-kernel-drivers)
+    UninstallKernelDrivers();
+
+    printf("------------------------------------------\n");
+    printf(" Conflicting package removal complete\n");
+    printf("------------------------------------------\n\n");
 }
 
 // ============================================================================
@@ -566,15 +698,146 @@ static void DeleteDirectoryRecursive(const char *dir)
 }
 
 // ============================================================================
+// Driver store query helpers (for /query)
+// ============================================================================
+
+typedef struct {
+    char originalName[128];   // e.g. "qcwwan.inf"
+    char publishedName[128];  // e.g. "oem42.inf"
+    char driverVersion[128];  // e.g. "01/01/2024 1.0.0.0"
+    char providerName[128];   // e.g. "Qualcomm"
+    char className[128];      // e.g. "Net"
+} DriverStoreEntry;
+
+#define MAX_DRIVER_ENTRIES 64
+
+// Parse pnputil /enum-drivers output and find entries matching any of the
+// given INF names. Returns the number of matches found.
+static int QueryDriverStore(const char *infNames[], size_t numNames,
+                            DriverStoreEntry *results, int maxResults)
+{
+    char cmdLine[512];
+    STARTUPINFOA si = {0};
+    PROCESS_INFORMATION pi = {0};
+    char tempFile[MAX_PATH];
+    char tempDir[MAX_PATH];
+    int found = 0;
+
+    GetTempPathA(MAX_PATH, tempDir);
+    snprintf(tempFile, MAX_PATH, "%spnputil_query_%lu.txt",
+             tempDir, GetCurrentProcessId());
+
+    snprintf(cmdLine, sizeof(cmdLine),
+             "cmd /c pnputil /enum-drivers > \"%s\" 2>&1", tempFile);
+
+    si.cb = sizeof(si);
+    if (!CreateProcessA(NULL, cmdLine, NULL, NULL, FALSE,
+                        CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+        return 0;
+    }
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+
+    FILE *fp = fopen(tempFile, "r");
+    if (!fp) {
+        DeleteFileA(tempFile);
+        return 0;
+    }
+
+    // Parse the output block by block.
+    // Each driver entry has: Published Name, Original Name, Provider Name,
+    // Class Name, Class GUID, Driver Version, Signer Name
+    char line[512];
+    char curPublished[128] = {0};
+    char curOriginal[128] = {0};
+    char curVersion[128] = {0};
+    char curProvider[128] = {0};
+    char curClass[128] = {0};
+
+    while (fgets(line, sizeof(line), fp)) {
+        // Helper: extract value after colon
+        char *colon = strchr(line, ':');
+        if (!colon) {
+            // Blank line = end of entry block, check for match
+            if (curOriginal[0]) {
+                for (size_t i = 0; i < numNames && found < maxResults; i++) {
+                    if (_stricmp(curOriginal, infNames[i]) == 0) {
+                        strncpy_s(results[found].originalName, sizeof(results[found].originalName), curOriginal, _TRUNCATE);
+                        strncpy_s(results[found].publishedName, sizeof(results[found].publishedName), curPublished, _TRUNCATE);
+                        strncpy_s(results[found].driverVersion, sizeof(results[found].driverVersion), curVersion, _TRUNCATE);
+                        strncpy_s(results[found].providerName, sizeof(results[found].providerName), curProvider, _TRUNCATE);
+                        strncpy_s(results[found].className, sizeof(results[found].className), curClass, _TRUNCATE);
+                        found++;
+                        break;
+                    }
+                }
+            }
+            curPublished[0] = curOriginal[0] = curVersion[0] = curProvider[0] = curClass[0] = '\0';
+            continue;
+        }
+
+        // Extract the value (skip colon + spaces, trim newline)
+        char *val = colon + 1;
+        while (*val == ' ') val++;
+        char *nl = strchr(val, '\n');
+        if (nl) *nl = '\0';
+        nl = strchr(val, '\r');
+        if (nl) *nl = '\0';
+
+        if (strstr(line, "Published Name") || strstr(line, "Published name"))
+            strncpy_s(curPublished, sizeof(curPublished), val, _TRUNCATE);
+        else if (strstr(line, "Original Name") || strstr(line, "Original name"))
+            strncpy_s(curOriginal, sizeof(curOriginal), val, _TRUNCATE);
+        else if (strstr(line, "Driver Version") || strstr(line, "Driver version"))
+            strncpy_s(curVersion, sizeof(curVersion), val, _TRUNCATE);
+        else if (strstr(line, "Provider Name") || strstr(line, "Provider name"))
+            strncpy_s(curProvider, sizeof(curProvider), val, _TRUNCATE);
+        else if (strstr(line, "Class Name") || strstr(line, "Class name"))
+            strncpy_s(curClass, sizeof(curClass), val, _TRUNCATE);
+    }
+
+    // Check last entry (file may not end with blank line)
+    if (curOriginal[0]) {
+        for (size_t i = 0; i < numNames && found < maxResults; i++) {
+            if (_stricmp(curOriginal, infNames[i]) == 0) {
+                strncpy_s(results[found].originalName, sizeof(results[found].originalName), curOriginal, _TRUNCATE);
+                strncpy_s(results[found].publishedName, sizeof(results[found].publishedName), curPublished, _TRUNCATE);
+                strncpy_s(results[found].driverVersion, sizeof(results[found].driverVersion), curVersion, _TRUNCATE);
+                strncpy_s(results[found].providerName, sizeof(results[found].providerName), curProvider, _TRUNCATE);
+                strncpy_s(results[found].className, sizeof(results[found].className), curClass, _TRUNCATE);
+                found++;
+                break;
+            }
+        }
+    }
+
+    fclose(fp);
+    DeleteFileA(tempFile);
+    return found;
+}
+
+// Userspace driver INFs (the ones this installer manages)
+static const char *kUserspaceDriverINFs[] = {
+    "qcadb.inf",
+    "qcfilter.inf",
+    "qcmdmlib.inf",
+    "qcserlib.inf",
+    "qcwwanlib.inf",
+    "qdblib.inf",
+};
+#define NUM_USERSPACE_DRIVER_INFS (sizeof(kUserspaceDriverINFs) / sizeof(kUserspaceDriverINFs[0]))
+
+// ============================================================================
 // Command handlers
 // ============================================================================
 
 static void PrintUsage(void)
 {
-    printf("Usage: QcomUsbDriverInstaller [options]\n\n");
+    printf("Usage: qcom-usb-userspace-drivers [options]\n\n");
     printf("Options:\n");
     printf("  (no options)   Install drivers (auto-upgrades if older version found)\n");
-    printf("  /query         Query installed driver package name and version\n");
+    printf("  /query         Query installed driver packages and detect conflicts\n");
     printf("  /force         Force install (bypass version check, reinstall/downgrade)\n");
     printf("  /version       Print installer version and exit\n");
     printf("  /help          Print this help message\n");
@@ -592,28 +855,81 @@ static int CmdQuery(void)
     bool hasInfList = GetInstalledINFList(infList, sizeof(infList));
     bool hasDate    = GetInstallDate(installDate, sizeof(installDate));
 
-    if (!hasVersion) {
-        printf("No Qualcomm USB Userspace Drivers installation found.\n");
-        return 1;
+    // --- Section 1: Current userspace installation (from registry) ---
+    printf("==========================================\n");
+    printf(" Installed Userspace Driver Package\n");
+    printf("==========================================\n");
+    if (hasVersion) {
+        printf("  Package:   %s\n", hasPackage ? packageName : "(unknown)");
+        printf("  Version:   %s\n", version);
+        if (hasDate)
+            printf("  Installed: %s\n", installDate);
+        if (hasInfList) {
+            printf("  INF files: ");
+            for (const char *p = infList; *p; p++) {
+                if (*p == ';')
+                    printf(", ");
+                else
+                    putchar(*p);
+            }
+            printf("\n");
+        }
+        printf("  Registry:  HKLM\\%s\n", INSTALLER_REG_KEY);
+    } else {
+        printf("  (not installed)\n");
     }
 
-    printf("Installed Driver Package:\n");
-    printf("  Package:   %s\n", hasPackage ? packageName : "(unknown)");
-    printf("  Version:   %s\n", version);
-    if (hasDate)
-        printf("  Installed: %s\n", installDate);
-    if (hasInfList) {
-        printf("  INF files: ");
-        // Print semicolon list more readably
-        for (const char *p = infList; *p; p++) {
-            if (*p == ';')
-                printf(", ");
-            else
-                putchar(*p);
+    // --- Section 2: Userspace drivers in driver store ---
+    printf("\n==========================================\n");
+    printf(" Userspace Drivers in Driver Store\n");
+    printf("==========================================\n");
+    DriverStoreEntry usEntries[MAX_DRIVER_ENTRIES];
+    int usCount = QueryDriverStore(kUserspaceDriverINFs, NUM_USERSPACE_DRIVER_INFS,
+                                   usEntries, MAX_DRIVER_ENTRIES);
+    if (usCount > 0) {
+        for (int i = 0; i < usCount; i++) {
+            printf("  %-20s  OEM: %-14s  Version: %s\n",
+                   usEntries[i].originalName,
+                   usEntries[i].publishedName,
+                   usEntries[i].driverVersion);
         }
-        printf("\n");
+    } else {
+        printf("  (none found)\n");
     }
-    printf("\n  Registry:  HKLM\\%s\n", INSTALLER_REG_KEY);
+
+    // --- Section 3: Kernel-mode drivers in driver store ---
+    printf("\n==========================================\n");
+    printf(" Kernel-Mode Drivers in Driver Store\n");
+    printf("==========================================\n");
+    DriverStoreEntry kmEntries[MAX_DRIVER_ENTRIES];
+    int kmCount = QueryDriverStore(kKernelDriverINFs, NUM_KERNEL_DRIVER_INFS,
+                                   kmEntries, MAX_DRIVER_ENTRIES);
+    if (kmCount > 0) {
+        for (int i = 0; i < kmCount; i++) {
+            printf("  %-20s  OEM: %-14s  Version: %s\n",
+                   kmEntries[i].originalName,
+                   kmEntries[i].publishedName,
+                   kmEntries[i].driverVersion);
+        }
+        printf("\n  ** Kernel-mode drivers conflict with userspace drivers.\n");
+        printf("     Run the installer to remove them automatically.\n");
+    } else {
+        printf("  (none found)\n");
+    }
+
+    // --- Section 4: Legacy QPM packages ---
+    printf("\n==========================================\n");
+    printf(" Legacy QPM-Managed Packages\n");
+    printf("==========================================\n");
+    if (IsQpmCliAvailable()) {
+        printf("  qpm-cli found on PATH.\n");
+        printf("  Known legacy packages: QUD, QUD.internal, Qualcomm_Userspace_Driver\n");
+        printf("  Run the installer to attempt removal automatically.\n");
+    } else {
+        printf("  qpm-cli not found on PATH (no legacy packages detected).\n");
+    }
+    printf("\n");
+
     return 0;
 }
 
@@ -736,10 +1052,12 @@ int main(int argc, char *argv[])
             printf("FORCE: Reinstalling version %s...\n\n", INSTALLER_VERSION_STR);
         }
 
-        // Uninstall old drivers before installing new ones
-        UninstallOldDrivers();
+        // Uninstall old drivers and conflicting packages before installing new ones
+        UninstallConflictingPackages();
     } else {
-        printf("No previous installation found. Performing fresh install.\n\n");
+        printf("No previous installation found.\n\n");
+        // Still check for conflicting kernel/legacy packages on fresh install
+        UninstallConflictingPackages();
     }
 
     // Create temp extraction directory

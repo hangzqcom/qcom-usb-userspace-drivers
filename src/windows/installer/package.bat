@@ -13,7 +13,7 @@ REM   - Python 3 (for packaging step)
 REM   - Run build.bat first to generate .cat files
 REM
 REM Usage: package.bat
-REM Output: QcomUsbDriverInstaller_<version>.exe (in current directory)
+REM Output: qcom-usb-userspace-drivers_<version>.exe (in current directory)
 
 setlocal enabledelayedexpansion
 
@@ -45,7 +45,7 @@ REM Step 2-3: Create ZIP and append payload using Python
 echo [2/3] Packaging driver files...
 echo [3/3] Appending payload to EXE...
 REM package.py reads version from version.h and auto-generates output filename
-python "%SCRIPT_DIR%package.py" "%BUILD_DIR%\Release\QcomUsbDriverInstaller.exe" "%DRIVER_DIR%"
+python "%SCRIPT_DIR%package.py" "%BUILD_DIR%\Release\qcom-usb-userspace-drivers.exe" "%DRIVER_DIR%"
 if errorlevel 1 (
     echo ERROR: Packaging failed
     exit /b 1
