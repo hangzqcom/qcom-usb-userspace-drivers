@@ -6,6 +6,13 @@
 // at build time. At runtime the payload is extracted to a temp directory,
 // drivers are installed via pnputil, and the temp directory is cleaned up.
 // Must be run as Administrator.
+//
+// Usage:
+//   QcomUsbDriverInstaller.exe                 Install (auto-upgrades old version)
+//   QcomUsbDriverInstaller.exe /query          Query installed version
+//   QcomUsbDriverInstaller.exe /force          Force install (skip version check)
+//   QcomUsbDriverInstaller.exe /version        Print installer version and exit
+//   QcomUsbDriverInstaller.exe /help           Print usage
 
 #include <windows.h>
 #include <stdio.h>
@@ -15,9 +22,11 @@
 #include <shellapi.h>
 
 #include "miniz.h"
+#include "version.h"
 
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "advapi32.lib")
 
 // ============================================================================
 // Payload trailer — appended after the ZIP at the end of the EXE
@@ -35,6 +44,111 @@ typedef struct {
 
 static const char kPayloadMagic[8] = { 'Q','U','S','B','P','K','0','1' };
 #define TRAILER_SIZE sizeof(PayloadTrailer)
+
+// ============================================================================
+// Version comparison
+// Parse version string "major.minor.patch.build" and compare.
+// Returns: -1 if a < b, 0 if equal, 1 if a > b
+// ============================================================================
+
+typedef struct {
+    int major, minor, patch, build;
+} VersionInfo;
+
+static bool ParseVersion(const char *str, VersionInfo *ver)
+{
+    memset(ver, 0, sizeof(*ver));
+    if (!str || !*str) return false;
+    int n = sscanf(str, "%d.%d.%d.%d",
+                   &ver->major, &ver->minor, &ver->patch, &ver->build);
+    return n >= 1;
+}
+
+static int CompareVersion(const VersionInfo *a, const VersionInfo *b)
+{
+    if (a->major != b->major) return a->major < b->major ? -1 : 1;
+    if (a->minor != b->minor) return a->minor < b->minor ? -1 : 1;
+    if (a->patch != b->patch) return a->patch < b->patch ? -1 : 1;
+    if (a->build != b->build) return a->build < b->build ? -1 : 1;
+    return 0;
+}
+
+// ============================================================================
+// Registry helpers — track installed version
+// ============================================================================
+
+static bool RegReadString(HKEY hRoot, const char *subKey, const char *valueName,
+                          char *buf, DWORD bufSize)
+{
+    HKEY hKey;
+    if (RegOpenKeyExA(hRoot, subKey, 0, KEY_READ, &hKey) != ERROR_SUCCESS)
+        return false;
+
+    DWORD type = 0, size = bufSize;
+    LSTATUS status = RegQueryValueExA(hKey, valueName, NULL, &type,
+                                      (LPBYTE)buf, &size);
+    RegCloseKey(hKey);
+    return status == ERROR_SUCCESS && type == REG_SZ;
+}
+
+static bool RegWriteString(HKEY hRoot, const char *subKey, const char *valueName,
+                           const char *value)
+{
+    HKEY hKey;
+    DWORD disposition;
+    if (RegCreateKeyExA(hRoot, subKey, 0, NULL, REG_OPTION_NON_VOLATILE,
+                        KEY_WRITE, NULL, &hKey, &disposition) != ERROR_SUCCESS)
+        return false;
+
+    LSTATUS status = RegSetValueExA(hKey, valueName, 0, REG_SZ,
+                                    (const BYTE *)value,
+                                    (DWORD)(strlen(value) + 1));
+    RegCloseKey(hKey);
+    return status == ERROR_SUCCESS;
+}
+
+static bool GetInstalledVersion(char *buf, DWORD bufSize)
+{
+    return RegReadString(HKEY_LOCAL_MACHINE, INSTALLER_REG_KEY,
+                         INSTALLER_REG_VERSION, buf, bufSize);
+}
+
+static bool GetInstalledINFList(char *buf, DWORD bufSize)
+{
+    return RegReadString(HKEY_LOCAL_MACHINE, INSTALLER_REG_KEY,
+                         INSTALLER_REG_INF_LIST, buf, bufSize);
+}
+
+static bool GetInstalledPackageName(char *buf, DWORD bufSize)
+{
+    return RegReadString(HKEY_LOCAL_MACHINE, INSTALLER_REG_KEY,
+                         INSTALLER_REG_PACKAGE, buf, bufSize);
+}
+
+static bool GetInstallDate(char *buf, DWORD bufSize)
+{
+    return RegReadString(HKEY_LOCAL_MACHINE, INSTALLER_REG_KEY,
+                         INSTALLER_REG_INSTALL_DATE, buf, bufSize);
+}
+
+static void SaveInstallInfo(const char *version, const char *infList)
+{
+    RegWriteString(HKEY_LOCAL_MACHINE, INSTALLER_REG_KEY,
+                   INSTALLER_REG_VERSION, version);
+    RegWriteString(HKEY_LOCAL_MACHINE, INSTALLER_REG_KEY,
+                   INSTALLER_REG_PACKAGE, INSTALLER_PACKAGE_NAME);
+    RegWriteString(HKEY_LOCAL_MACHINE, INSTALLER_REG_KEY,
+                   INSTALLER_REG_INF_LIST, infList);
+
+    // Save install date
+    SYSTEMTIME st;
+    char dateBuf[64];
+    GetLocalTime(&st);
+    snprintf(dateBuf, sizeof(dateBuf), "%04d-%02d-%02d %02d:%02d:%02d",
+             st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+    RegWriteString(HKEY_LOCAL_MACHINE, INSTALLER_REG_KEY,
+                   INSTALLER_REG_INSTALL_DATE, dateBuf);
+}
 
 // ============================================================================
 // Admin check / elevation
@@ -55,12 +169,23 @@ static bool IsRunningAsAdmin(void)
     return isAdmin != FALSE;
 }
 
-static bool RelaunchAsAdmin(const char *exePath)
+static bool RelaunchAsAdmin(int argc, char *argv[])
 {
+    char exePath[MAX_PATH];
+    GetModuleFileNameA(NULL, exePath, MAX_PATH);
+
+    // Rebuild argument string (skip argv[0])
+    char args[2048] = {0};
+    for (int i = 1; i < argc; i++) {
+        if (i > 1) strcat_s(args, sizeof(args), " ");
+        strcat_s(args, sizeof(args), argv[i]);
+    }
+
     SHELLEXECUTEINFOA sei = {0};
     sei.cbSize = sizeof(sei);
     sei.lpVerb = "runas";
     sei.lpFile = exePath;
+    sei.lpParameters = args[0] ? args : NULL;
     sei.nShow = SW_SHOWNORMAL;
     sei.fMask = SEE_MASK_NOCLOSEPROCESS;
 
@@ -222,8 +347,121 @@ static bool ExtractPayload(const char *exePath, const char *extractDir,
 }
 
 // ============================================================================
-// Driver installation via pnputil
+// Driver uninstall / install via pnputil
 // ============================================================================
+
+static int UninstallDriverByINF(const char *infName)
+{
+    // Use pnputil /enum-drivers to find the OEM name for this INF,
+    // then /delete-driver to remove it.
+    char cmdLine[512];
+    STARTUPINFOA si = {0};
+    PROCESS_INFORMATION pi = {0};
+    DWORD exitCode = 1;
+    char tempFile[MAX_PATH];
+    char tempDir[MAX_PATH];
+
+    // Write pnputil output to a temp file so we can parse it
+    GetTempPathA(MAX_PATH, tempDir);
+    snprintf(tempFile, MAX_PATH, "%spnputil_enum_%lu.txt",
+             tempDir, GetCurrentProcessId());
+
+    snprintf(cmdLine, sizeof(cmdLine),
+             "cmd /c pnputil /enum-drivers > \"%s\" 2>&1", tempFile);
+
+    si.cb = sizeof(si);
+    if (!CreateProcessA(NULL, cmdLine, NULL, NULL, FALSE,
+                        CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+        return 1;
+    }
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+
+    // Parse the output to find the OEM INF name for our original INF
+    FILE *fp = fopen(tempFile, "r");
+    if (!fp) {
+        DeleteFileA(tempFile);
+        return 1;
+    }
+
+    char line[512];
+    char currentOem[128] = {0};
+    bool found = false;
+
+    while (fgets(line, sizeof(line), fp)) {
+        // Look for "Published Name:" lines
+        char *p = strstr(line, "Published Name");
+        if (!p) p = strstr(line, "Published name");
+        if (p) {
+            char *colon = strchr(p, ':');
+            if (colon) {
+                colon++;
+                while (*colon == ' ') colon++;
+                // Trim newline
+                char *nl = strchr(colon, '\n');
+                if (nl) *nl = '\0';
+                nl = strchr(colon, '\r');
+                if (nl) *nl = '\0';
+                strncpy_s(currentOem, sizeof(currentOem), colon, _TRUNCATE);
+            }
+        }
+
+        // Look for "Original Name:" lines
+        p = strstr(line, "Original Name");
+        if (!p) p = strstr(line, "Original name");
+        if (p) {
+            char *colon = strchr(p, ':');
+            if (colon) {
+                colon++;
+                while (*colon == ' ') colon++;
+                char *nl = strchr(colon, '\n');
+                if (nl) *nl = '\0';
+                nl = strchr(colon, '\r');
+                if (nl) *nl = '\0';
+
+                if (_stricmp(colon, infName) == 0 && currentOem[0]) {
+                    found = true;
+                    break;
+                }
+            }
+        }
+    }
+    fclose(fp);
+    DeleteFileA(tempFile);
+
+    if (!found || !currentOem[0]) {
+        // Driver not in the store — nothing to uninstall
+        return 0;
+    }
+
+    printf("  Removing old driver: %s (OEM: %s)\n", infName, currentOem);
+
+    snprintf(cmdLine, sizeof(cmdLine),
+             "pnputil /delete-driver %s /uninstall /force", currentOem);
+
+    memset(&si, 0, sizeof(si));
+    si.cb = sizeof(si);
+    memset(&pi, 0, sizeof(pi));
+
+    if (!CreateProcessA(NULL, cmdLine, NULL, NULL, FALSE,
+                        CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+        printf("  WARNING: Failed to launch pnputil for uninstall\n");
+        return 1;
+    }
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+
+    if (exitCode == 0) {
+        printf("  OK: %s uninstalled\n", infName);
+    } else {
+        printf("  WARNING: %s uninstall returned code %lu (may already be removed)\n",
+               infName, exitCode);
+    }
+    return 0;  // Non-fatal: proceed with install even if uninstall failed
+}
 
 static int InstallDriver(const char *infPath, const char *infName)
 {
@@ -255,6 +493,34 @@ static int InstallDriver(const char *infPath, const char *infName)
         printf("  FAILED: %s (pnputil exit code %lu)\n", infName, exitCode);
     }
     return (int)exitCode;
+}
+
+// ============================================================================
+// Uninstall all previously installed INFs (from registry list)
+// ============================================================================
+
+static void UninstallOldDrivers(void)
+{
+    char infList[4096] = {0};
+    if (!GetInstalledINFList(infList, sizeof(infList))) {
+        printf("No previously installed driver list found.\n\n");
+        return;
+    }
+
+    printf("Uninstalling previous driver packages...\n\n");
+
+    // INF list is semicolon-separated: "qcadb.inf;qcserlib.inf;..."
+    char *ctx = NULL;
+    char *token = strtok_s(infList, ";", &ctx);
+    while (token) {
+        // Trim whitespace
+        while (*token == ' ') token++;
+        if (*token) {
+            UninstallDriverByINF(token);
+        }
+        token = strtok_s(NULL, ";", &ctx);
+    }
+    printf("\n");
 }
 
 // ============================================================================
@@ -300,6 +566,64 @@ static void DeleteDirectoryRecursive(const char *dir)
 }
 
 // ============================================================================
+// Command handlers
+// ============================================================================
+
+static void PrintUsage(void)
+{
+    printf("Usage: QcomUsbDriverInstaller [options]\n\n");
+    printf("Options:\n");
+    printf("  (no options)   Install drivers (auto-upgrades if older version found)\n");
+    printf("  /query         Query installed driver package name and version\n");
+    printf("  /force         Force install (bypass version check, reinstall/downgrade)\n");
+    printf("  /version       Print installer version and exit\n");
+    printf("  /help          Print this help message\n");
+}
+
+static int CmdQuery(void)
+{
+    char version[128] = {0};
+    char packageName[256] = {0};
+    char infList[4096] = {0};
+    char installDate[128] = {0};
+
+    bool hasVersion = GetInstalledVersion(version, sizeof(version));
+    bool hasPackage = GetInstalledPackageName(packageName, sizeof(packageName));
+    bool hasInfList = GetInstalledINFList(infList, sizeof(infList));
+    bool hasDate    = GetInstallDate(installDate, sizeof(installDate));
+
+    if (!hasVersion) {
+        printf("No Qualcomm USB Userspace Drivers installation found.\n");
+        return 1;
+    }
+
+    printf("Installed Driver Package:\n");
+    printf("  Package:   %s\n", hasPackage ? packageName : "(unknown)");
+    printf("  Version:   %s\n", version);
+    if (hasDate)
+        printf("  Installed: %s\n", installDate);
+    if (hasInfList) {
+        printf("  INF files: ");
+        // Print semicolon list more readably
+        for (const char *p = infList; *p; p++) {
+            if (*p == ';')
+                printf(", ");
+            else
+                putchar(*p);
+        }
+        printf("\n");
+    }
+    printf("\n  Registry:  HKLM\\%s\n", INSTALLER_REG_KEY);
+    return 0;
+}
+
+static int CmdVersion(void)
+{
+    printf("%s Installer v%s\n", INSTALLER_PACKAGE_NAME, INSTALLER_VERSION_STR);
+    return 0;
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 
@@ -311,16 +635,47 @@ int main(int argc, char *argv[])
     WIN32_FIND_DATAA findData;
     HANDLE hFind;
     int installed = 0, failed = 0, total = 0;
+    bool forceInstall = false;
+    bool queryMode = false;
+    bool versionMode = false;
 
+    // Parse command-line arguments
+    for (int i = 1; i < argc; i++) {
+        if (_stricmp(argv[i], "/query") == 0 || _stricmp(argv[i], "-query") == 0) {
+            queryMode = true;
+        } else if (_stricmp(argv[i], "/force") == 0 || _stricmp(argv[i], "-force") == 0) {
+            forceInstall = true;
+        } else if (_stricmp(argv[i], "/version") == 0 || _stricmp(argv[i], "-version") == 0) {
+            versionMode = true;
+        } else if (_stricmp(argv[i], "/help") == 0 || _stricmp(argv[i], "-help") == 0 ||
+                   _stricmp(argv[i], "/?") == 0 || _stricmp(argv[i], "-h") == 0) {
+            PrintUsage();
+            return 0;
+        } else {
+            printf("Unknown option: %s\n\n", argv[i]);
+            PrintUsage();
+            return 1;
+        }
+    }
+
+    // Handle /version (no admin required)
+    if (versionMode)
+        return CmdVersion();
+
+    // Handle /query (no admin required)
+    if (queryMode)
+        return CmdQuery();
+
+    // --- Installation flow ---
     printf("==========================================\n");
-    printf(" Qualcomm USB Userspace Driver Installer\n");
+    printf(" %s\n", INSTALLER_PACKAGE_NAME);
+    printf(" Installer v%s\n", INSTALLER_VERSION_STR);
     printf("==========================================\n\n");
 
     // Check for admin
     if (!IsRunningAsAdmin()) {
         printf("Administrator privileges required. Requesting elevation...\n");
-        GetModuleFileNameA(NULL, exePath, MAX_PATH);
-        if (RelaunchAsAdmin(exePath))
+        if (RelaunchAsAdmin(argc, argv))
             return 0;
         printf("ERROR: Failed to obtain administrator privileges.\n");
         printf("Please right-click the installer and select 'Run as administrator'.\n");
@@ -336,7 +691,7 @@ int main(int argc, char *argv[])
     PayloadTrailer trailer;
     if (!ReadTrailer(exePath, &trailer)) {
         printf("ERROR: No embedded driver payload found.\n");
-        printf("This installer must be packaged using build.bat first.\n");
+        printf("This installer must be packaged using package.bat first.\n");
         printf("\nPress any key to exit...\n");
         getchar();
         return 1;
@@ -345,6 +700,47 @@ int main(int argc, char *argv[])
     printf("Payload found: %llu bytes at offset %llu\n\n",
            (unsigned long long)trailer.payloadSize,
            (unsigned long long)trailer.payloadOffset);
+
+    // Version check
+    char installedVer[128] = {0};
+    if (GetInstalledVersion(installedVer, sizeof(installedVer))) {
+        VersionInfo viInstalled, viNew;
+        ParseVersion(installedVer, &viInstalled);
+        ParseVersion(INSTALLER_VERSION_STR, &viNew);
+        int cmp = CompareVersion(&viNew, &viInstalled);
+
+        printf("Currently installed version: %s\n", installedVer);
+        printf("Installer version:           %s\n\n", INSTALLER_VERSION_STR);
+
+        if (cmp == 0 && !forceInstall) {
+            printf("Same version is already installed.\n");
+            printf("Use /force to reinstall.\n");
+            printf("\nPress any key to exit...\n");
+            getchar();
+            return 0;
+        } else if (cmp < 0 && !forceInstall) {
+            printf("A newer version (%s) is already installed.\n", installedVer);
+            printf("Use /force to downgrade to %s.\n", INSTALLER_VERSION_STR);
+            printf("\nPress any key to exit...\n");
+            getchar();
+            return 0;
+        }
+
+        if (cmp > 0) {
+            printf("Upgrading from %s to %s...\n\n", installedVer,
+                   INSTALLER_VERSION_STR);
+        } else if (cmp < 0) {
+            printf("FORCE: Downgrading from %s to %s...\n\n", installedVer,
+                   INSTALLER_VERSION_STR);
+        } else {
+            printf("FORCE: Reinstalling version %s...\n\n", INSTALLER_VERSION_STR);
+        }
+
+        // Uninstall old drivers before installing new ones
+        UninstallOldDrivers();
+    } else {
+        printf("No previous installation found. Performing fresh install.\n\n");
+    }
 
     // Create temp extraction directory
     if (!CreateTempExtractDir(extractDir, sizeof(extractDir))) {
@@ -368,6 +764,10 @@ int main(int argc, char *argv[])
     printf("Extraction complete. Installing drivers...\n\n");
 
     // Find and install all INF files in the extracted directory
+    // Also build a list for registry
+    char infListBuf[4096] = {0};
+    size_t infListLen = 0;
+
     snprintf(searchPath, MAX_PATH, "%s\\*.inf", extractDir);
     hFind = FindFirstFileA(searchPath, &findData);
     if (hFind == INVALID_HANDLE_VALUE) {
@@ -389,10 +789,28 @@ int main(int argc, char *argv[])
         } else {
             failed++;
         }
+
+        // Append to INF list (semicolon-separated)
+        if (infListLen > 0 && infListLen < sizeof(infListBuf) - 1) {
+            infListBuf[infListLen++] = ';';
+        }
+        size_t nameLen = strlen(findData.cFileName);
+        if (infListLen + nameLen < sizeof(infListBuf)) {
+            memcpy(infListBuf + infListLen, findData.cFileName, nameLen);
+            infListLen += nameLen;
+            infListBuf[infListLen] = '\0';
+        }
+
         printf("\n");
     } while (FindNextFileA(hFind, &findData));
 
     FindClose(hFind);
+
+    // Save installed version and INF list to registry
+    if (installed > 0) {
+        SaveInstallInfo(INSTALLER_VERSION_STR, infListBuf);
+        printf("Version %s recorded in registry.\n\n", INSTALLER_VERSION_STR);
+    }
 
     // Cleanup temp directory
     printf("Cleaning up temporary files...\n\n");
@@ -401,6 +819,7 @@ int main(int argc, char *argv[])
     printf("==========================================\n");
     printf(" Installation Summary\n");
     printf("==========================================\n");
+    printf("  Version:   %s\n", INSTALLER_VERSION_STR);
     printf("  Total:     %d\n", total);
     printf("  Installed: %d\n", installed);
     printf("  Failed:    %d\n", failed);

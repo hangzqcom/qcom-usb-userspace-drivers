@@ -4,7 +4,10 @@
 #
 # Package driver files into a self-extracting installer EXE.
 #
-# Usage: package.py <input_exe> <driver_dir> <output_exe>
+# Usage: package.py <input_exe> <driver_dir> [output_exe]
+#
+# If output_exe is omitted, the version is read from version.h and used
+# to generate the filename: QcomUsbDriverInstaller_<version>.exe
 #
 # This script:
 #   1. Copies the input EXE to the output path
@@ -15,6 +18,7 @@
 
 import sys
 import os
+import re
 import shutil
 import struct
 import zipfile
@@ -26,14 +30,39 @@ PAYLOAD_MAGIC = b'QUSBPK01'
 TRAILER_FORMAT = '<8sQQII'  # magic(8) + offset(u64) + size(u64) + crc32(u32) + reserved(u32)
 TRAILER_SIZE = struct.calcsize(TRAILER_FORMAT)
 
+
+def read_version_from_header():
+    """Read INSTALLER_VERSION_STR from version.h in the same directory."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    version_h = os.path.join(script_dir, 'version.h')
+    if not os.path.isfile(version_h):
+        return None
+    with open(version_h, 'r') as f:
+        for line in f:
+            m = re.match(r'#define\s+INSTALLER_VERSION_STR\s+"([^"]+)"', line)
+            if m:
+                return m.group(1)
+    return None
+
+
 def main():
-    if len(sys.argv) != 4:
-        print(f"Usage: {sys.argv[0]} <input_exe> <driver_dir> <output_exe>")
+    if len(sys.argv) < 3 or len(sys.argv) > 4:
+        print(f"Usage: {sys.argv[0]} <input_exe> <driver_dir> [output_exe]")
         sys.exit(1)
 
     input_exe = sys.argv[1]
     driver_dir = sys.argv[2]
-    output_exe = sys.argv[3]
+
+    # Determine output filename
+    if len(sys.argv) >= 4:
+        output_exe = sys.argv[3]
+    else:
+        version = read_version_from_header()
+        if version:
+            output_exe = f"QcomUsbDriverInstaller_{version}.exe"
+        else:
+            output_exe = "QcomUsbDriverInstaller.exe"
+            print("WARNING: Could not read version from version.h, using default name")
 
     if not os.path.isfile(input_exe):
         print(f"ERROR: Input EXE not found: {input_exe}")
@@ -42,6 +71,11 @@ def main():
     if not os.path.isdir(driver_dir):
         print(f"ERROR: Driver directory not found: {driver_dir}")
         sys.exit(1)
+
+    # Read version for display
+    version = read_version_from_header()
+    if version:
+        print(f"Installer version: {version}")
 
     # Collect driver files (INF + CAT)
     driver_files = []

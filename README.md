@@ -11,83 +11,64 @@ Qualcomm userspace drivers provides logical representations of Qualcomm chipset-
 
 ```
 /
-├─ src/                   # Qualcomm USB userspace driver source root directory
-│   ├── linux/            # Linux userspace driver source
-│   └── windows/          # Windows userspace driver source
-│         ├── build.bat   # Build script to generate catalog (.cat) files
-│         ├── sign.bat    # Script to sign catalog (.cat) files
-│         ├── install.bat # Batch installer for all driver packages
-│         ├── installer/  # Native .EXE installer source (C, CMake)
-│         └── *.inf       # Driver setup information files
-├─ README.md              # This file
-└─ ...                    # Other files and directories
+├─ src/                        # Qualcomm USB userspace driver source root directory
+│   ├── linux/                 # Linux userspace driver source
+│   └── windows/               # Windows userspace driver source
+│         ├── installer/       # Self-extracting installer (build scripts, C source)
+│         └── ...              # Signed driver setup information (INF) and catalog files
+├─ README.md                   # This file
+└─ ...                         # Other files and directories
 ```
-
-## Build (Windows)
-
-Driver catalog (`.cat`) files must be generated before installation. These files contain
-cryptographic hashes that Windows uses to verify driver integrity during installation.
-
-### Prerequisites
-- [Windows Driver Kit (WDK)](https://learn.microsoft.com/en-us/windows-hardware/drivers/download-the-wdk) — provides `inf2cat.exe`
-- [Windows SDK](https://developer.microsoft.com/en-us/windows/downloads/windows-sdk/) — provides `signtool.exe` (required only for signing)
-- A valid code signing certificate (required only for signing)
-
-### Generate catalog files
-```bash
-src\windows\build.bat
-```
-
-### Sign catalog files
-```bash
-src\windows\sign.bat "Your Certificate Subject Name"
-```
-
-### Build the self-extracting .EXE installer (optional)
-The installer is a single self-extracting EXE that embeds all INF + CAT files as a
-ZIP payload appended to the binary. At runtime it extracts the payload to a temp
-directory, installs every `.inf` via `pnputil`, then cleans up.
-
-**Additional prerequisites:**
-- [CMake](https://cmake.org/) and [Visual Studio](https://visualstudio.microsoft.com/) (or the MSVC Build Tools)
-- [Python 3](https://www.python.org/) (for the packaging step)
-
-> **Note:** The installer uses [miniz](https://github.com/richgel999/miniz) (MIT license)
-> for ZIP extraction, which is vendored in `src/windows/installer/`.
-
-```bash
-REM 1. Generate .cat files (if not already done)
-src\windows\build.bat
-
-REM 2. Build the installer EXE and package driver files into it
-src\windows\installer\package.bat
-```
-The output `QcomUsbDriverInstaller.exe` will be in `src\windows\installer\`.
 
 ## Install / Uninstall
 
-#### Windows
-- Installation
+#### Windows — Self-Extracting Installer
 
-  - Right click the `.inf` file and select **Install**, or
-  - Run `src\windows\install.bat` (batch script), or
-  - Run `QcomUsbDriverInstaller.exe` (native installer, auto-elevates to admin)
+The recommended way to install/manage drivers on Windows is the self-extracting
+installer EXE produced by `src\windows\installer\package.bat`.
 
-- Uninstallation (Device Manager)
-1. Open **Device Manager**.
-2. Right click the target device and select **Uninstall device**.
-3. Check **Attempt to remove the driver for this device**.
-4. Click **Uninstall**.
+| Command | Description |
+|---|---|
+| `QcomUsbDriverInstaller.exe` | Install drivers (auto-upgrades if an older version is found) |
+| `QcomUsbDriverInstaller.exe /query` | Query installed driver package name, version, and date |
+| `QcomUsbDriverInstaller.exe /force` | Force install (bypass version check — reinstall or downgrade) |
+| `QcomUsbDriverInstaller.exe /version` | Print installer version and exit |
+| `QcomUsbDriverInstaller.exe /help` | Print usage help |
 
-- Uninstallation (Command Line)
-1. Locate the **Published Name** of the installed driver package:
-  ```bash
-  pnputil /enum-drivers
-  ```
-2. Delete the driver from system
-  ```bash
-  pnputil /delete-driver oemxx.inf /uninstall /force
-  ```
+> **Note:** The installer requires Administrator privileges and will prompt for
+> elevation automatically.
+
+The installer records the installed version, INF list, and install date in the
+registry at `HKLM\SOFTWARE\Qualcomm\QcomUsbDrivers`. On upgrade or `/force`
+reinstall, it automatically uninstalls previously installed driver packages
+before installing the new ones.
+
+**Building the installer:**
+```bat
+cd src\windows\installer
+package.bat
+```
+This produces `QcomUsbDriverInstaller_<version>.exe` in the current directory.
+
+#### Windows — Manual Installation
+
+- **Install:** Right-click the `.inf` file and select **Install**.
+
+- **Uninstall (Device Manager):**
+  1. Open **Device Manager**.
+  2. Right-click the target device and select **Uninstall device**.
+  3. Check **Attempt to remove the driver for this device**.
+  4. Click **Uninstall**.
+
+- **Uninstall (Command Line):**
+  1. Locate the **Published Name** of the installed driver package:
+     ```bat
+     pnputil /enum-drivers
+     ```
+  2. Delete the driver from the system:
+     ```bat
+     pnputil /delete-driver oemxx.inf /uninstall /force
+     ```
 #### Linux command:
   Navigate to folder `src/linux`
 

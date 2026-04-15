@@ -6,5 +6,5 @@ sign-test.bat
 
 # Installer build artifacts
 src/windows/installer/build/
-src/windows/installer/QcomUsbDriverInstaller.exe
+src/windows/installer/QcomUsbDriverInstaller*.exe
 
