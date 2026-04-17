@@ -12,7 +12,7 @@ setlocal enabledelayedexpansion
 :: Usage:
 ::   build.bat
 
-set "SCRIPT_DIR=%~dp0"
+set "SCRIPT_DIR=%~dp0\"
 
 :: Locate inf2cat.exe - check PATH first, then search WDK installation (prefer x86 build)
 set "INF2CAT=inf2cat"
@@ -46,7 +46,7 @@ echo.
 
 :: Generate catalog files for all INF files in the driver directory
 echo Generating catalog files...
-"!INF2CAT!" /driver:"%SCRIPT_DIR%." /os:%OS_VERSIONS%
+"!INF2CAT!" /driver:"%SCRIPT_DIR%" /os:%OS_VERSIONS%
 
 if !ERRORLEVEL! NEQ 0 (
     echo.

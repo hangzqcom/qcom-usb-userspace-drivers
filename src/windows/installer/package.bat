@@ -17,9 +17,9 @@ REM Output: qcom-usb-userspace-drivers_<version>.exe (in current directory)
 
 setlocal enabledelayedexpansion
 
-set SCRIPT_DIR=%~dp0
-set DRIVER_DIR=%SCRIPT_DIR%..
-set BUILD_DIR=%SCRIPT_DIR%build
+set "SCRIPT_DIR=%~dp0\"
+set "DRIVER_DIR=%SCRIPT_DIR%.."
+set "BUILD_DIR=%SCRIPT_DIR%build"
 
 echo ==========================================
 echo  Qualcomm USB Driver Installer Packager
