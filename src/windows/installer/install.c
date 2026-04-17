@@ -379,14 +379,47 @@ static bool ExtractPayload(const char *exePath, const char *extractDir,
 // Driver uninstall / install via pnputil
 // ============================================================================
 
-static int UninstallDriverByINF(const char *infName)
+// Helper: delete a single OEM driver package via pnputil
+static void DeleteOemDriver(const char *infName, const char *oemName)
 {
-    // Use pnputil /enum-drivers to find the OEM name for this INF,
-    // then /delete-driver to remove it.
     char cmdLine[512];
     STARTUPINFOA si = {0};
     PROCESS_INFORMATION pi = {0};
     DWORD exitCode = 1;
+
+    printf("  Removing driver: %s (OEM: %s)\n", infName, oemName);
+
+    snprintf(cmdLine, sizeof(cmdLine),
+             "pnputil /delete-driver %s /uninstall /force", oemName);
+
+    si.cb = sizeof(si);
+    if (!CreateProcessA(NULL, cmdLine, NULL, NULL, FALSE,
+                        CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+        printf("  WARNING: Failed to launch pnputil for uninstall\n");
+        return;
+    }
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+
+    if (exitCode == 0) {
+        printf("  OK: %s (%s) uninstalled\n", infName, oemName);
+    } else {
+        printf("  WARNING: %s (%s) uninstall returned code %lu (may already be removed)\n",
+               infName, oemName, exitCode);
+    }
+}
+
+static int UninstallDriverByINF(const char *infName)
+{
+    // Use pnputil /enum-drivers to find ALL OEM names for this INF,
+    // then /delete-driver to remove each one immediately as it is found.
+    // A single INF may appear multiple times in the driver store if
+    // several versions were installed, each under a different OEM name.
+    char cmdLine[512];
+    STARTUPINFOA si = {0};
+    PROCESS_INFORMATION pi = {0};
     char tempFile[MAX_PATH];
     char tempDir[MAX_PATH];
 
@@ -407,7 +440,7 @@ static int UninstallDriverByINF(const char *infName)
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
 
-    // Parse the output to find the OEM INF name for our original INF
+    // Parse the output and uninstall each matching OEM driver immediately
     FILE *fp = fopen(tempFile, "r");
     if (!fp) {
         DeleteFileA(tempFile);
@@ -416,7 +449,6 @@ static int UninstallDriverByINF(const char *infName)
 
     char line[512];
     char currentOem[128] = {0};
-    bool found = false;
 
     while (fgets(line, sizeof(line), fp)) {
         // Look for "Published Name:" lines
@@ -450,8 +482,8 @@ static int UninstallDriverByINF(const char *infName)
                 if (nl) *nl = '\0';
 
                 if (_stricmp(colon, infName) == 0 && currentOem[0]) {
-                    found = true;
-                    break;
+                    DeleteOemDriver(infName, currentOem);
+                    currentOem[0] = '\0';
                 }
             }
         }
@@ -459,36 +491,6 @@ static int UninstallDriverByINF(const char *infName)
     fclose(fp);
     DeleteFileA(tempFile);
 
-    if (!found || !currentOem[0]) {
-        // Driver not in the store — nothing to uninstall
-        return 0;
-    }
-
-    printf("  Removing old driver: %s (OEM: %s)\n", infName, currentOem);
-
-    snprintf(cmdLine, sizeof(cmdLine),
-             "pnputil /delete-driver %s /uninstall /force", currentOem);
-
-    memset(&si, 0, sizeof(si));
-    si.cb = sizeof(si);
-    memset(&pi, 0, sizeof(pi));
-
-    if (!CreateProcessA(NULL, cmdLine, NULL, NULL, FALSE,
-                        CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
-        printf("  WARNING: Failed to launch pnputil for uninstall\n");
-        return 1;
-    }
-    WaitForSingleObject(pi.hProcess, INFINITE);
-    GetExitCodeProcess(pi.hProcess, &exitCode);
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
-
-    if (exitCode == 0) {
-        printf("  OK: %s uninstalled\n", infName);
-    } else {
-        printf("  WARNING: %s uninstall returned code %lu (may already be removed)\n",
-               infName, exitCode);
-    }
     return 0;  // Non-fatal: proceed with install even if uninstall failed
 }
 
@@ -767,8 +769,8 @@ static int QueryDriverStore(const char *infNames[], size_t numNames,
         char *colon = strchr(line, ':');
         if (!colon) {
             // Blank line = end of entry block, check for match
-            if (curOriginal[0]) {
-                for (size_t i = 0; i < numNames && found < maxResults; i++) {
+            if (curOriginal[0] && found < maxResults) {
+                for (size_t i = 0; i < numNames; i++) {
                     if (_stricmp(curOriginal, infNames[i]) == 0) {
                         strncpy_s(results[found].originalName, sizeof(results[found].originalName), curOriginal, _TRUNCATE);
                         strncpy_s(results[found].publishedName, sizeof(results[found].publishedName), curPublished, _TRUNCATE);
@@ -776,7 +778,7 @@ static int QueryDriverStore(const char *infNames[], size_t numNames,
                         strncpy_s(results[found].providerName, sizeof(results[found].providerName), curProvider, _TRUNCATE);
                         strncpy_s(results[found].className, sizeof(results[found].className), curClass, _TRUNCATE);
                         found++;
-                        break;
+                        break;  // matched this entry to an INF name, move to next entry
                     }
                 }
             }
@@ -805,8 +807,8 @@ static int QueryDriverStore(const char *infNames[], size_t numNames,
     }
 
     // Check last entry (file may not end with blank line)
-    if (curOriginal[0]) {
-        for (size_t i = 0; i < numNames && found < maxResults; i++) {
+    if (curOriginal[0] && found < maxResults) {
+        for (size_t i = 0; i < numNames; i++) {
             if (_stricmp(curOriginal, infNames[i]) == 0) {
                 strncpy_s(results[found].originalName, sizeof(results[found].originalName), curOriginal, _TRUNCATE);
                 strncpy_s(results[found].publishedName, sizeof(results[found].publishedName), curPublished, _TRUNCATE);
@@ -814,7 +816,7 @@ static int QueryDriverStore(const char *infNames[], size_t numNames,
                 strncpy_s(results[found].providerName, sizeof(results[found].providerName), curProvider, _TRUNCATE);
                 strncpy_s(results[found].className, sizeof(results[found].className), curClass, _TRUNCATE);
                 found++;
-                break;
+                break;  // matched this entry to an INF name, move on
             }
         }
     }
