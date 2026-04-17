@@ -134,6 +134,21 @@ static bool RegWriteString(HKEY hRoot, const char *subKey, const char *valueName
     return status == ERROR_SUCCESS;
 }
 
+static bool RegWriteDword(HKEY hRoot, const char *subKey, const char *valueName,
+                          DWORD value)
+{
+    HKEY hKey;
+    DWORD disposition;
+    if (RegCreateKeyExA(hRoot, subKey, 0, NULL, REG_OPTION_NON_VOLATILE,
+                        KEY_WRITE, NULL, &hKey, &disposition) != ERROR_SUCCESS)
+        return false;
+
+    LSTATUS status = RegSetValueExA(hKey, valueName, 0, REG_DWORD,
+                                    (const BYTE *)&value, sizeof(DWORD));
+    RegCloseKey(hKey);
+    return status == ERROR_SUCCESS;
+}
+
 static bool GetInstalledVersion(char *buf, DWORD bufSize)
 {
     return RegReadString(HKEY_LOCAL_MACHINE, INSTALLER_REG_KEY,
@@ -164,8 +179,101 @@ static bool RegDeleteKey_Full(HKEY hRoot, const char *subKey)
     return status == ERROR_SUCCESS;
 }
 
+// ============================================================================
+// Install directory helpers - copy files to persistent install location
+// ============================================================================
+
+static bool CopyFilesToInstallDir(const char *exePath, const char *extractDir)
+{
+    const char *installDir = INSTALLER_INSTALL_DIR;
+
+    // SHFileOperation requires double-null terminated strings
+    char src[MAX_PATH + 2] = {0};
+    char dst[MAX_PATH + 2] = {0};
+
+    // Copy the entire extract directory contents to the install directory.
+    // Use "extractDir\*" as source to copy contents (not the directory itself).
+    snprintf(src, MAX_PATH, "%s\\*", extractDir);
+    src[strlen(src) + 1] = '\0';  // double-null terminate
+
+    strncpy_s(dst, MAX_PATH, installDir, _TRUNCATE);
+    dst[strlen(dst) + 1] = '\0';  // double-null terminate
+
+    SHFILEOPSTRUCTA op = {0};
+    op.wFunc  = FO_COPY;
+    op.pFrom  = src;
+    op.pTo    = dst;
+    op.fFlags = FOF_NOCONFIRMATION | FOF_NOCONFIRMMKDIR | FOF_NOERRORUI | FOF_SILENT;
+
+    int ret = SHFileOperationA(&op);
+    if (ret != 0) {
+        printf("ERROR: Failed to copy files to install directory (error 0x%X)\n", ret);
+        return false;
+    }
+
+    // Copy the installer EXE itself into the install directory
+    char destExePath[MAX_PATH];
+    snprintf(destExePath, sizeof(destExePath), "%s\\%s",
+             installDir, INSTALLER_EXE_NAME);
+    if (!CopyFileA(exePath, destExePath, FALSE)) {
+        printf("ERROR: Failed to copy installer EXE to %s (error %lu)\n",
+               destExePath, GetLastError());
+        return false;
+    }
+
+    printf("  Files copied to: %s\n", installDir);
+    return true;
+}
+
+// Clean up the install directory during uninstall.
+// First tries SHFileOperation for a full recursive delete.
+// If that fails (e.g. running EXE is locked), falls back to
+// MoveFileEx to schedule the remaining items for deletion on reboot.
+static void CleanupInstallDirectory(void)
+{
+    const char *installDir = INSTALLER_INSTALL_DIR;
+
+    // Check if directory exists
+    DWORD attr = GetFileAttributesA(installDir);
+    if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+        printf("  Install directory not found.\n");
+        return;
+    }
+
+    // SHFileOperation requires double-null terminated string
+    char path[MAX_PATH + 2] = {0};
+    strncpy_s(path, MAX_PATH, installDir, _TRUNCATE);
+    path[strlen(path) + 1] = '\0';
+
+    SHFILEOPSTRUCTA op = {0};
+    op.wFunc  = FO_DELETE;
+    op.pFrom  = path;
+    op.fFlags = FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT;
+
+    int ret = SHFileOperationA(&op);
+    if (ret == 0) {
+        printf("  Removed: %s\n", installDir);
+        return;
+    }
+
+    // SHFileOperation failed (likely because the running EXE is locked).
+    // Schedule the entire directory for deletion on reboot.
+    printf("  Could not fully delete (error 0x%X), scheduling for reboot...\n", ret);
+    if (MoveFileExA(installDir, NULL, MOVEFILE_DELAY_UNTIL_REBOOT)) {
+        printf("  Scheduled for deletion on reboot: %s\n", installDir);
+    } else {
+        printf("  WARNING: Could not schedule directory for deletion (error %lu)\n",
+               GetLastError());
+    }
+}
+
+// ============================================================================
+// Save install info to registry (including ARP entries for Control Panel)
+// ============================================================================
+
 static void SaveInstallInfo(const char *version, const char *infList)
 {
+    // Custom installer tracking values
     RegWriteString(HKEY_LOCAL_MACHINE, INSTALLER_REG_KEY,
                    INSTALLER_REG_VERSION, version);
     RegWriteString(HKEY_LOCAL_MACHINE, INSTALLER_REG_KEY,
@@ -173,7 +281,7 @@ static void SaveInstallInfo(const char *version, const char *infList)
     RegWriteString(HKEY_LOCAL_MACHINE, INSTALLER_REG_KEY,
                    INSTALLER_REG_INF_LIST, infList);
 
-    // Save install date
+    // Install date in custom format
     SYSTEMTIME st;
     char dateBuf[64];
     GetLocalTime(&st);
@@ -181,6 +289,34 @@ static void SaveInstallInfo(const char *version, const char *infList)
              st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
     RegWriteString(HKEY_LOCAL_MACHINE, INSTALLER_REG_KEY,
                    INSTALLER_REG_INSTALL_DATE, dateBuf);
+
+    // Standard ARP (Add/Remove Programs) registry values for Control Panel
+    RegWriteString(HKEY_LOCAL_MACHINE, INSTALLER_REG_KEY,
+                   "DisplayName", INSTALLER_PACKAGE_NAME);
+    RegWriteString(HKEY_LOCAL_MACHINE, INSTALLER_REG_KEY,
+                   "DisplayVersion", version);
+    RegWriteString(HKEY_LOCAL_MACHINE, INSTALLER_REG_KEY,
+                   "Publisher", INSTALLER_PUBLISHER);
+    RegWriteString(HKEY_LOCAL_MACHINE, INSTALLER_REG_KEY,
+                   "InstallLocation", INSTALLER_INSTALL_DIR);
+
+    // UninstallString: path to EXE in install dir with /uninstall flag
+    char uninstallStr[MAX_PATH + 32];
+    snprintf(uninstallStr, sizeof(uninstallStr),
+             "\"%s\\%s\" /uninstall", INSTALLER_INSTALL_DIR, INSTALLER_EXE_NAME);
+    RegWriteString(HKEY_LOCAL_MACHINE, INSTALLER_REG_KEY,
+                   "UninstallString", uninstallStr);
+
+    // Install date in ARP format (YYYYMMDD)
+    char arpDate[16];
+    snprintf(arpDate, sizeof(arpDate), "%04d%02d%02d",
+             st.wYear, st.wMonth, st.wDay);
+    RegWriteString(HKEY_LOCAL_MACHINE, INSTALLER_REG_KEY,
+                   "InstallDate", arpDate);
+
+    // Disable Modify and Repair buttons (not applicable for driver packages)
+    RegWriteDword(HKEY_LOCAL_MACHINE, INSTALLER_REG_KEY, "NoModify", 1);
+    RegWriteDword(HKEY_LOCAL_MACHINE, INSTALLER_REG_KEY, "NoRepair", 1);
 }
 
 // ============================================================================
@@ -1025,6 +1161,12 @@ static int CmdUninstall(void)
         printf("  Registry key not found or already removed.\n\n");
     }
 
+    // Clean up install directory (deletes files immediately where possible,
+    // schedules locked files for deletion on reboot)
+    printf("Cleaning up install directory...\n");
+    CleanupInstallDirectory();
+    printf("\n");
+
     printf("==========================================\n");
     printf(" Uninstall Summary\n");
     printf("==========================================\n");
@@ -1240,8 +1382,15 @@ int main(int argc, char *argv[])
 
     FindClose(hFind);
 
-    // Save installed version and INF list to registry
+    // Copy files to persistent install directory and save registry info
     if (installed > 0) {
+        printf("Copying files to install directory...\n");
+        if (CopyFilesToInstallDir(exePath, extractDir)) {
+            printf("  Install directory: %s\n\n", INSTALLER_INSTALL_DIR);
+        } else {
+            printf("  WARNING: Some files may not have been copied.\n\n");
+        }
+
         SaveInstallInfo(INSTALLER_VERSION_STR, infListBuf);
         printf("Version %s recorded in registry.\n\n", INSTALLER_VERSION_STR);
     }

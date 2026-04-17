@@ -11,9 +11,12 @@
 
 #define INSTALLER_VERSION_STR    "1.00.1.7"
 #define INSTALLER_PACKAGE_NAME   "Qualcomm USB Userspace Drivers"
+#define INSTALLER_PUBLISHER      "Qualcomm Technologies, Inc."
+#define INSTALLER_INSTALL_DIR    "C:\\Program Files (x86)\\Qualcomm\\Qualcomm USB Userspace Drivers"
+#define INSTALLER_EXE_NAME       "qcom-usb-userspace-drivers.exe"
 
 // Registry key for tracking installed version
-#define INSTALLER_REG_KEY        "SOFTWARE\\Qualcomm\\QcomUsbDrivers"
+#define INSTALLER_REG_KEY        "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Qualcomm USB Userspace Drivers"
 #define INSTALLER_REG_VERSION    "Version"
 #define INSTALLER_REG_PACKAGE    "PackageName"
 #define INSTALLER_REG_INF_LIST   "InstalledINFs"
